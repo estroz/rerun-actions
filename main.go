@@ -5,6 +5,7 @@ import (
 	"os"
 	"path"
 	"strconv"
+	"strings"
 
 	actions "github.com/sethvargo/go-githubactions"
 )
@@ -18,11 +19,11 @@ func main() {
 	ctx := context.Background()
 	h.initFromInputs(ctx)
 
-	eventIDStr := h.GetInput("event-id")
-	if eventIDStr == "" {
-		h.Action.Fatalf("Empty event-id")
+	commentIDStr := h.GetInput("comment_id")
+	if commentIDStr == "" {
+		h.Action.Fatalf("Empty comment_id")
 	}
-	eventID, err := strconv.ParseInt(eventIDStr, 10, 64)
+	commentID, err := strconv.ParseInt(commentIDStr, 10, 64)
 	if err != nil {
 		h.Fatalf("%v", err)
 	}
@@ -32,7 +33,9 @@ func main() {
 		h.Action.Fatalf("Empty repo")
 	}
 	repoOwner, repoName := path.Split(repo)
-	if err := h.handle(ctx, repoOwner, repoName, eventID); err != nil {
+	repoOwner = strings.Trim(repoOwner, "/")
+	h.Debugf("Repo owner=%s name=%s commentID=%d", repoOwner, repoName, commentID)
+	if err := h.handle(ctx, repoOwner, repoName, commentID); err != nil {
 		h.Fatalf("%v", err)
 	}
 }
