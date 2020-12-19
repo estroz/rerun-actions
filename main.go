@@ -1,70 +1,38 @@
 package main
 
 import (
+	"context"
 	"os"
-	"regexp"
-	"time"
+	"path"
+	"strconv"
 
-	"github.com/gregjones/httpcache"
-	"github.com/palantir/go-baseapp/baseapp"
-	"github.com/palantir/go-githubapp/githubapp"
-	"github.com/rs/zerolog"
-	"goji.io/v3/pat"
+	actions "github.com/sethvargo/go-githubactions"
 )
 
 func main() {
-	config, err := readConfig("config.yml")
+
+	h := &handler{
+		Action: actions.New(),
+	}
+
+	ctx := context.Background()
+	h.initFromInputs(ctx)
+
+	eventIDStr := h.GetInput("event-id")
+	if eventIDStr == "" {
+		h.Action.Fatalf("Empty event-id")
+	}
+	eventID, err := strconv.ParseInt(eventIDStr, 10, 64)
 	if err != nil {
-		panic(err)
+		h.Fatalf("%v", err)
 	}
 
-	logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
-
-	handler := &RerunActionsHandler{}
-	for _, reStr := range config.AllowUserRegexpList {
-		re, err := regexp.Compile(reStr)
-		if err != nil {
-			logger.Error().Err(err).Msg("Failed to parse allow user regexp")
-			os.Exit(1)
-		}
-		handler.allowUserRegexps = append(handler.allowUserRegexps, re)
+	repo := os.Getenv("GITHUB_REPOSITORY")
+	if repo == "" {
+		h.Action.Fatalf("Empty repo")
 	}
-	for _, reStr := range config.DenyUserRegexpList {
-		re, err := regexp.Compile(reStr)
-		if err != nil {
-			logger.Error().Err(err).Msg("Failed to parse deny user regexp")
-			os.Exit(1)
-		}
-		handler.denyUserRegexps = append(handler.denyUserRegexps, re)
-	}
-
-	server, err := baseapp.NewServer(
-		config.Server,
-		baseapp.DefaultParams(logger, "rerun-actions.")...,
-	)
-	if err != nil {
-		panic(err)
-	}
-
-	handler.ClientCreator, err = githubapp.NewDefaultCachingClientCreator(
-		config.Github,
-		githubapp.WithClientUserAgent("rerun-actions-app/0.1.0"),
-		githubapp.WithClientTimeout(3*time.Second),
-		githubapp.WithClientCaching(false, func() httpcache.Cache { return httpcache.NewMemoryCache() }),
-		githubapp.WithClientMiddleware(
-			githubapp.ClientMetrics(server.Registry()),
-		),
-	)
-	if err != nil {
-		panic(err)
-	}
-
-	webhookHandler := githubapp.NewDefaultEventDispatcher(config.Github, handler)
-	server.Mux().Handle(pat.Post(githubapp.DefaultWebhookRoute), webhookHandler)
-
-	// Start is blocking
-	err = server.Start()
-	if err != nil {
-		panic(err)
+	repoOwner, repoName := path.Split(repo)
+	if err := h.handle(ctx, repoOwner, repoName, eventID); err != nil {
+		h.Fatalf("%v", err)
 	}
 }

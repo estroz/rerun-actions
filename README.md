@@ -1,2 +1,3 @@
-# rerun-actions-app
-A GitHub App that re-runs Action Workflows via PR comment commands.
+# rerun-actions
+
+A GitHub Action that re-runs other Action Workflows via PR comment commands.
