@@ -21,16 +21,16 @@ func main() {
 
 	commentIDStr := h.GetInput("comment_id")
 	if commentIDStr == "" {
-		h.Action.Fatalf("Empty comment_id")
+		h.Fatalf("Empty comment_id")
 	}
 	commentID, err := strconv.ParseInt(commentIDStr, 10, 64)
 	if err != nil {
-		h.Fatalf("%v", err)
+		h.Fatalf("Failed to parse comment_id: %v", err)
 	}
 
 	repo := os.Getenv("GITHUB_REPOSITORY")
 	if repo == "" {
-		h.Action.Fatalf("Empty repo")
+		h.Fatalf("GITHUB_REPOSITORY not set")
 	}
 	repoOwner, repoName := path.Split(repo)
 	repoOwner = strings.Trim(repoOwner, "/")

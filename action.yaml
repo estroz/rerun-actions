@@ -1,18 +1,12 @@
 name: rerun-actions
-description: Rerun other GitHub Actions on pull requests by comments.
+description: Rerun other GitHub Actions on pull requests via comment commands.
 inputs:
-  comment_id:
-    description: ID of the comment creation event. Set to 'github.event.comment.id'.
-    required: true
   repo_token:
     description: OAuth or personal access token must be included with the 'repo' scope.
     required: true
-  allow_user_regexp_list:
-    description: JSON list of regexps of users allowed to rerun actions.
-    required: false
-  deny_user_regexp_list:
-    description: JSON list of regexps of users not allowed to rerun actions.
-    required: false
+  comment_id:
+    description: ID of the comment creation event. Set to 'github.event.comment.id'.
+    required: true
 runs:
   using: 'docker'
   image: 'docker://quay.io/estroz/rerun-actions:main'

@@ -3,11 +3,9 @@ package main
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
-	"regexp"
 	"strings"
 
 	"github.com/google/go-github/v33/github"
@@ -20,9 +18,6 @@ const testAll = "__all"
 type handler struct {
 	*github.Client
 	*actions.Action
-
-	allowUserRegexps []*regexp.Regexp
-	denyUserRegexps  []*regexp.Regexp
 }
 
 func (h *handler) handle(ctx context.Context, repoOwner, repoName string, commentID int64) error {
@@ -50,13 +45,6 @@ func (h *handler) handle(ctx context.Context, repoOwner, repoName string, commen
 		return nil
 	}
 
-	// Check allow and deny lists if present.
-	user := comment.GetUser().GetLogin()
-	if !h.canUserComment(user) {
-		h.Debugf("Issue comment was created by ignored user %s", user)
-		return nil
-	}
-
 	prNum := issue.GetNumber()
 	pr, _, err := h.PullRequests.Get(ctx, repoOwner, repoName, prNum)
 	if err != nil {
@@ -71,7 +59,6 @@ func (h *handler) handle(ctx context.Context, repoOwner, repoName string, commen
 	}
 
 	testsToRerun := parseCommentsToWorkflowNames(comment.GetBody())
-	h.Debugf("Raw comment:\n%s\n\nParsed:\n%s\n", comment.GetBody(), testsToRerun)
 
 	opts := &github.ListOptions{}
 	allWorkflows, _, err := h.Actions.ListWorkflows(ctx, repoOwner, repoName, opts)
@@ -82,7 +69,7 @@ func (h *handler) handle(ctx context.Context, repoOwner, repoName string, commen
 
 	var workflows []*github.Workflow
 	if _, rerunAll := testsToRerun[testAll]; rerunAll {
-		h.Debugf("Attempting to rerun all workflows")
+		h.Debugf("Rerunning all workflows")
 		workflows = allWorkflows.Workflows
 	} else {
 		for _, workflow := range allWorkflows.Workflows {
@@ -100,12 +87,12 @@ func (h *handler) handle(ctx context.Context, repoOwner, repoName string, commen
 		h.Debugf("Workflow name: %s (%s)", workflow.GetName(), workflow.GetPath())
 		// Always skip this workflow to prevent recursion issues.
 		if wfName := os.Getenv("GITHUB_WORKFLOW"); wfName == workflow.GetName() || wfName == workflow.GetPath() {
-			h.Debugf("Skipping the rerun workflow")
+			h.Debugf("Skipping the workflow containing this job")
 			continue
 		}
 		// Do not attempt to rerun inactive workflows.
 		if workflow.GetState() != "active" {
-			h.Debugf("Inactive workflow: %s", workflow.GetName())
+			h.Debugf("Skipping inactive workflow")
 			continue
 		}
 		opts := &github.ListWorkflowRunsOptions{
@@ -121,11 +108,12 @@ func (h *handler) handle(ctx context.Context, repoOwner, repoName string, commen
 			return nil
 		}
 		for _, run := range workflowRuns.WorkflowRuns {
-			// Stop searching runs once an older run is found (assuming they are linearized by time).
+			// Stop searching runs once an older run is found.
 			if run.GetCreatedAt().Before(pr.GetCreatedAt()) {
 				h.Debugf("Older workflow run than PR %d found", prNum)
 				break
 			}
+			// A matching run's SHA will match the PR's head SHA.
 			if run.GetHeadSHA() == pr.GetHead().GetSHA() {
 				h.Debugf("Found run matching PR %d SHA %s", prNum, pr.GetHead().GetSHA())
 				runsToRerun = append(runsToRerun, run)
@@ -137,7 +125,7 @@ func (h *handler) handle(ctx context.Context, repoOwner, repoName string, commen
 	for _, run := range runsToRerun {
 		if run.GetStatus() != "completed" {
 			// Cancel non-completed runs before queuing a rerun.
-			h.Debugf("Run %v status: %s", run.GetID(), run.GetStatus())
+			h.Debugf("Cancellling %s run %v", run.GetStatus(), run.GetID())
 			_, err := h.Actions.CancelWorkflowRunByID(ctx, repoOwner, repoName, run.GetID())
 			if err != nil {
 				h.Debugf("Failed to cancel workflow run: %v", err)
@@ -173,47 +161,13 @@ func (h *handler) getIssueForComment(ctx context.Context, comment *github.IssueC
 }
 
 func (h *handler) initFromInputs(ctx context.Context) {
-	allowListStr := h.GetInput("allow_user_regexp_list")
-	denyListStr := h.GetInput("deny_user_regexp_list")
-
-	var allowList, denyList []string
-	if allowListStr != "" {
-		if err := json.Unmarshal([]byte(allowListStr), &allowList); err != nil {
-			h.Fatalf("Failed to unmarshal allow list")
-		}
-	}
-	if denyListStr != "" {
-		h.Debugf("Unmarshal deny: %s", denyListStr)
-		if err := json.Unmarshal([]byte(denyListStr), &denyList); err != nil {
-			h.Fatalf("Failed to unmarshal deny list")
-		}
-	}
-
-	for _, reStr := range allowList {
-		re, err := regexp.Compile(reStr)
-		if err != nil {
-			h.Fatalf("Failed to parse allow user regexp")
-		}
-		h.allowUserRegexps = append(h.allowUserRegexps, re)
-	}
-	for _, reStr := range denyList {
-		h.Debugf("Parsing deny: %s", reStr)
-		re, err := regexp.Compile(reStr)
-		if err != nil {
-			h.Fatalf("Failed to parse deny user regexp")
-		}
-		h.denyUserRegexps = append(h.denyUserRegexps, re)
-	}
-
 	token := h.GetInput("repo_token")
 	if token == "" {
 		h.Fatalf("Empty repo_token")
 	}
-	tc := oauth2.NewClient(ctx, oauth2.StaticTokenSource(
+	h.Client = github.NewClient(oauth2.NewClient(ctx, oauth2.StaticTokenSource(
 		&oauth2.Token{AccessToken: token},
-	))
-
-	h.Client = github.NewClient(tc)
+	)))
 }
 
 func isIssueRerunable(issue *github.Issue) bool {
@@ -231,22 +185,7 @@ func hasOkToTestLabel(issue *github.Issue) bool {
 	return false
 }
 
-func (h handler) canUserComment(user string) bool {
-	for _, allowRE := range h.allowUserRegexps {
-		if !allowRE.MatchString(user) {
-			return false
-		}
-	}
-	for _, denyRE := range h.denyUserRegexps {
-		if denyRE.MatchString(user) {
-			return false
-		}
-	}
-	return true
-}
-
 func parseCommentsToWorkflowNames(commentBody string) map[string]struct{} {
-	// TODO: memoize some common strings on a per-repo basis, depending on performance of loading memoized strings.
 	testsToRerun := make(map[string]struct{})
 	scanner := bufio.NewScanner(strings.NewReader(commentBody))
 	for scanner.Scan() {
