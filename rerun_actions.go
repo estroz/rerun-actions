@@ -40,6 +40,14 @@ func (h *handler) handle(ctx context.Context, repoOwner, repoName string, commen
 	}
 	h.Debugf("Comment %d found", comment.GetID())
 
+	// Reduce the number of API calls when a PR comment that does not contain a command is created
+	// by returning if no commands are present in the comment body.
+	testsToRerun := parseCommentsToWorkflowNames(comment.GetBody())
+	if len(testsToRerun) == 0 {
+		h.Debugf("No commands in comment body")
+		return nil
+	}
+
 	issue, _, err := h.getIssueForComment(ctx, comment)
 	if err != nil {
 		h.Errorf("Failed to get issue: %v", err)
@@ -72,8 +80,6 @@ func (h *handler) handle(ctx context.Context, repoOwner, repoName string, commen
 		h.Debugf("PR has been merged, cannot rerun workflows")
 		return nil
 	}
-
-	testsToRerun := parseCommentsToWorkflowNames(comment.GetBody())
 
 	opts := &github.ListOptions{}
 	allWorkflows, _, err := h.Actions.ListWorkflows(ctx, repoOwner, repoName, opts)
