@@ -11,8 +11,9 @@ retrieved from an [`issue_comment` webhook event][issue_comment_wh]) for certain
 and rerunning jobs matching those commands.
 
 Some notes:
-- The PR *must* have a  `ok-to-test` label present on the PR. Typically this label can/should only be applied by
-repo reviewers/approvers to prevent spam and abuse.
+- The PR either must have an `ok-to-test` label present on the PR, or the user who writes a command must
+be an organization member, or repo owner, contributor, or collaborator.
+  - Typically `ok-to-test` can/should only be applied by repo reviewers/approvers to prevent spam and abuse.
 - `rerun-actions` should only be run on comment creation. See the below [examples](#examples) for how to do this.
 
 ## Comment commands

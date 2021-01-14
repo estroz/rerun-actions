@@ -20,6 +20,18 @@ type handler struct {
 	*actions.Action
 }
 
+// initFromActionsEnv initializes h from a GH Actions environment.
+func (h *handler) initFromActionsEnv(ctx context.Context) {
+	token := h.GetInput("repo_token")
+	if token == "" {
+		h.Fatalf("Empty repo_token")
+	}
+	h.Client = github.NewClient(oauth2.NewClient(ctx, oauth2.StaticTokenSource(
+		&oauth2.Token{AccessToken: token},
+	)))
+}
+
+// handle reruns a set of actions for the PR associated with a given commentID, if possible.
 func (h *handler) handle(ctx context.Context, repoOwner, repoName string, commentID int64) error {
 	comment, _, err := h.Issues.GetComment(ctx, repoOwner, repoName, commentID)
 	if err != nil {
@@ -35,13 +47,16 @@ func (h *handler) handle(ctx context.Context, repoOwner, repoName string, commen
 	}
 	h.Debugf("Issue %d found", issue.GetID())
 
+	// Actions associated with non-PR issues and locked PRs cannot be rerun.
 	if !isIssueRerunable(issue) {
 		h.Debugf("Issue is not a PR or is locked")
 		return nil
 	}
 
-	if !hasOkToTestLabel(issue) {
-		h.Debugf("Issue lacks the \"ok-to-test\" label: %s", issue.Labels)
+	// Issue must have "ok-to-test" label, or the issue commenter must have org/repo permissions to run tests.
+	if !hasOkToTestLabel(issue) && !isCommenterPrivileged(comment.GetAuthorAssociation()) {
+		h.Debugf("Issue lacks the \"ok-to-test\" label (labels: %v) and commenter is unprivileged (association: %s)",
+			issue.Labels, comment.GetAuthorAssociation())
 		return nil
 	}
 
@@ -160,16 +175,6 @@ func (h *handler) getIssueForComment(ctx context.Context, comment *github.IssueC
 	return issue, resp, nil
 }
 
-func (h *handler) initFromInputs(ctx context.Context) {
-	token := h.GetInput("repo_token")
-	if token == "" {
-		h.Fatalf("Empty repo_token")
-	}
-	h.Client = github.NewClient(oauth2.NewClient(ctx, oauth2.StaticTokenSource(
-		&oauth2.Token{AccessToken: token},
-	)))
-}
-
 func isIssueRerunable(issue *github.Issue) bool {
 	// Only handle non-locked pull requests.
 	return issue.IsPullRequest() && !issue.GetLocked()
@@ -183,6 +188,23 @@ func hasOkToTestLabel(issue *github.Issue) bool {
 		}
 	}
 	return false
+}
+
+// From API docs:
+// AuthorAssociation is the comment author's relationship to the issue's repository.
+// Possible values are "COLLABORATOR", "CONTRIBUTOR", "FIRST_TIMER", "FIRST_TIME_CONTRIBUTOR", "MEMBER", "OWNER", or "NONE".
+var privilegedAssociations = map[string]struct{}{
+	"collaborator": {},
+	"contributor":  {},
+	"member":       {},
+	"owner":        {},
+}
+
+// isCommenterPrivileged returns true if authorAssoc is a privileged keyword:
+// "collaborator", "contributor", "member", or "owner".
+func isCommenterPrivileged(authorAssoc string) bool {
+	_, isPrivileged := privilegedAssociations[strings.ToLower(authorAssoc)]
+	return isPrivileged
 }
 
 func parseCommentsToWorkflowNames(commentBody string) map[string]struct{} {

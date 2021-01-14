@@ -17,7 +17,7 @@ func main() {
 	}
 
 	ctx := context.Background()
-	h.initFromInputs(ctx)
+	h.initFromActionsEnv(ctx)
 
 	commentIDStr := h.GetInput("comment_id")
 	if commentIDStr == "" {
