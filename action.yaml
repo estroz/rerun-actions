@@ -9,7 +9,7 @@ inputs:
     required: true
 runs:
   using: 'docker'
-  image: 'docker://quay.io/estroz/rerun-actions:main'
+  image: 'Dockerfile'
 branding:
   icon: 'zap'
   color: 'blue'
