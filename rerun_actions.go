@@ -13,7 +13,15 @@ import (
 	"golang.org/x/oauth2"
 )
 
-const testAll = "__all"
+const (
+	testAll              = "__all"
+	completedStatus      = "completed"
+	successfulConclusion = "success"
+
+	canTestLabel              = "ok-to-test"
+	retestAllWorkflowsCommand = "rerun-all"
+	testWorkflowCommand       = "rerun-workflow"
+)
 
 type handler struct {
 	*github.Client
@@ -94,12 +102,12 @@ func (h *handler) handle(ctx context.Context, repoOwner, repoName string, commen
 		workflows = allWorkflows.Workflows
 	} else {
 		for _, workflow := range allWorkflows.Workflows {
-			if _, hasWorkflow := testsToRerun[workflow.GetName()]; hasWorkflow {
-				h.Debugf("Workflow %s found", workflow.GetName())
-				workflows = append(workflows, workflow)
-			} else {
+			if _, hasWorkflow := testsToRerun[workflow.GetName()]; !hasWorkflow {
 				h.Debugf("Workflow %s not found", workflow.GetName())
+				continue
 			}
+			h.Debugf("Workflow %s found", workflow.GetName())
+			workflows = append(workflows, workflow)
 		}
 	}
 
@@ -144,18 +152,19 @@ func (h *handler) handle(ctx context.Context, repoOwner, repoName string, commen
 	}
 
 	for _, run := range runsToRerun {
-		if run.GetStatus() != "completed" {
+		if run.GetStatus() == completedStatus && run.GetConclusion() == successfulConclusion {
+			// Skip runs that have completed and succeeded, since they cannot be re-run.
+			// This is still being worked on server-side afaik.
+			h.Debugf("Workflow run %d succeeded, will not rerun", run.GetID())
+			continue
+		}
+		if run.GetStatus() != completedStatus {
 			// Cancel non-completed runs before queuing a rerun.
 			h.Debugf("Cancellling %s run %v", run.GetStatus(), run.GetID())
 			_, err := h.Actions.CancelWorkflowRunByID(ctx, repoOwner, repoName, run.GetID())
 			if err != nil {
 				h.Debugf("Failed to cancel workflow run: %v", err)
 			}
-		} else if run.GetConclusion() == "success" {
-			// Skip runs that have completed and succeeded, since they cannot be re-run.
-			// This is still being worked on server-side afaik.
-			h.Debugf("Workflow run %d succeeded, will not rerun", run.GetID())
-			continue
 		}
 
 		h.Debugf("Rerunning %d", run.GetID())
@@ -189,7 +198,7 @@ func isIssueRerunable(issue *github.Issue) bool {
 func hasOkToTestLabel(issue *github.Issue) bool {
 	// Gate reruns on "ok-to-test" label presence.
 	for _, label := range issue.Labels {
-		if label.GetName() == "ok-to-test" {
+		if label.GetName() == canTestLabel {
 			return true
 		}
 	}
@@ -228,9 +237,9 @@ func parseCommentsToWorkflowNames(commentBody string) map[string]struct{} {
 			return nil
 		}
 		switch splitComment[0][1:] {
-		case "retest":
+		case retestAllWorkflowsCommand:
 			testsToRerun[testAll] = struct{}{}
-		case "test":
+		case testWorkflowCommand:
 			if len(splitComment) < 2 {
 				continue
 			}

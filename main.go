@@ -35,6 +35,7 @@ func main() {
 	repoOwner, repoName := path.Split(repo)
 	repoOwner = strings.Trim(repoOwner, "/")
 	h.Debugf("Repo owner=%s name=%s commentID=%d", repoOwner, repoName, commentID)
+
 	if err := h.handle(ctx, repoOwner, repoName, commentID); err != nil {
 		h.Fatalf("%v", err)
 	}
