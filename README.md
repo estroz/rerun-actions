@@ -11,6 +11,7 @@ retrieved from an [`issue_comment` webhook event][issue_comment_wh]) for certain
 and rerunning jobs matching those commands.
 
 Some notes:
+
 - The PR either must have an `ok-to-test` label present on the PR, or the user who writes a command must
 be an organization member, or repo owner, contributor, or collaborator.
   - Typically `ok-to-test` can/should only be applied by repo reviewers/approvers to prevent spam and abuse.
@@ -18,13 +19,12 @@ be an organization member, or repo owner, contributor, or collaborator.
 
 ## Comment commands
 
-These commands are named after
+The following commands are supported by this action:
 
-- `/retest` - rerun all failed workflows.
-- `/test <workflow name>` - rerun a specific failed workflow. Only one workflow name can be specified.
-Multiple `/test` commands are allowed per comment.
+- `/rerun-all` - rerun all failed workflows.
+- `/rerun-workflow <workflow name>` - rerun a specific failed workflow. Only one workflow name can be specified. Multiple `/rerun-workflow` commands are allowed per comment.
 
-Caveat: because of Action limitations, only failed workflows can be rerun.
+**Note**: Only failed workflows can be rerun due to [limitations in the Github Actions API][github_api_retest].
 
 ## Examples
 
@@ -39,7 +39,7 @@ jobs:
   rerun_pr_tests:
     name: rerun_pr_tests
     if: ${{ github.event.issue.pull_request }}
-    runs-on: ubuntu-18.04
+    runs-on: ubuntu-20.04
     steps:
     - uses: estroz/rerun-actions@main
       with:
@@ -48,3 +48,4 @@ jobs:
 ```
 
 [issue_comment_wh]:https://docs.github.com/en/free-pro-team@latest/developers/webhooks-and-events/webhook-events-and-payloads#issue_comment
+[github_api_retest]:https://github.community/t/cannot-re-run-a-successful-workflow-run-using-the-rest-api/123661/4
