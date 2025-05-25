@@ -8,7 +8,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/google/go-github/v33/github"
+	"github.com/google/go-github/v72/github"
 	actions "github.com/sethvargo/go-githubactions"
 	"golang.org/x/oauth2"
 )
@@ -20,6 +20,7 @@ const (
 
 	canTestLabel              = "ok-to-test"
 	retestAllWorkflowsCommand = "rerun-all"
+	retestFailedJobsCommand   = "rerun-failed"
 	testWorkflowCommand       = "rerun-workflow"
 )
 
@@ -50,10 +51,16 @@ func (h *handler) handle(ctx context.Context, repoOwner, repoName string, commen
 
 	// Reduce the number of API calls when a PR comment that does not contain a command is created
 	// by returning if no commands are present in the comment body.
-	testsToRerun := parseCommentsToWorkflowNames(comment.GetBody())
+	testsToRerun, failedOnly := parseCommentsToWorkflowNames(comment.GetBody())
 	if len(testsToRerun) == 0 {
 		h.Debugf("No commands in comment body")
 		return nil
+	}
+
+	// Add reaction to the comment
+	_, _, err = h.Client.Reactions.CreateIssueCommentReaction(ctx, repoOwner, repoName, comment.GetID(), "eyes")
+	if err != nil {
+		h.Warningf("Failed to add +1 reaction to comment: %v", err)
 	}
 
 	issue, _, err := h.getIssueForComment(ctx, comment)
@@ -85,7 +92,7 @@ func (h *handler) handle(ctx context.Context, repoOwner, repoName string, commen
 
 	// Can't rerun actions on merged PRs.
 	if pr.GetMerged() {
-		h.Debugf("PR has been merged, cannot rerun workflows")
+		h.Infof("PR has been merged, cannot rerun workflows")
 		return nil
 	}
 
@@ -124,29 +131,31 @@ func (h *handler) handle(ctx context.Context, repoOwner, repoName string, commen
 			h.Debugf("Skipping inactive workflow")
 			continue
 		}
-		opts := &github.ListWorkflowRunsOptions{
-			// Filter by whoever created the PR.
-			Actor: issue.GetUser().GetLogin(),
-			// Filter on pull request runs.
-			Event: "pull_request",
-		}
-		// TODO: paginate
-		workflowRuns, _, err := h.Actions.ListWorkflowRunsByID(ctx, repoOwner, repoName, workflow.GetID(), opts)
-		if err != nil {
-			h.Errorf("Failed to list workflow runs: %v", err)
-			return nil
-		}
-		for _, run := range workflowRuns.WorkflowRuns {
-			// Stop searching runs once an older run is found.
-			if run.GetCreatedAt().Before(pr.GetCreatedAt()) {
-				h.Debugf("Older workflow run than PR %d found", prNum)
-				break
+		for _, event := range []string{"pull_request", "pull_request_target", "push"} {
+			opts := &github.ListWorkflowRunsOptions{
+				// Filter by whoever created the PR.
+				Actor: issue.GetUser().GetLogin(),
+				// Filter on pull request runs.
+				Event: event,
 			}
-			// A matching run's SHA will match the PR's head SHA.
-			if run.GetHeadSHA() == pr.GetHead().GetSHA() {
-				h.Debugf("Found run matching PR %d SHA %s", prNum, pr.GetHead().GetSHA())
-				runsToRerun = append(runsToRerun, run)
-				break
+			// TODO: paginate
+			workflowRuns, _, err := h.Actions.ListWorkflowRunsByID(ctx, repoOwner, repoName, workflow.GetID(), opts)
+			if err != nil {
+				h.Errorf("Failed to list workflow runs: %v", err)
+				return nil
+			}
+			for _, run := range workflowRuns.WorkflowRuns {
+				// Stop searching for runs once an older run is found.
+				if run.GetCreatedAt().Time.Before(pr.GetCreatedAt().Time) {
+					h.Debugf("Older workflow run than PR %d found", prNum)
+					break
+				}
+				// A matching run's SHA will match the PR's head SHA.
+				if run.GetHeadSHA() == pr.GetHead().GetSHA() {
+					h.Infof("Found run matching PR %d SHA %s", prNum, pr.GetHead().GetSHA())
+					runsToRerun = append(runsToRerun, run)
+					break
+				}
 			}
 		}
 	}
@@ -155,22 +164,29 @@ func (h *handler) handle(ctx context.Context, repoOwner, repoName string, commen
 		if run.GetStatus() == completedStatus && run.GetConclusion() == successfulConclusion {
 			// Skip runs that have completed and succeeded, since they cannot be re-run.
 			// This is still being worked on server-side afaik.
-			h.Debugf("Workflow run %d succeeded, will not rerun", run.GetID())
+			h.Infof("Workflow run %d succeeded, will not rerun", run.GetID())
 			continue
 		}
 		if run.GetStatus() != completedStatus {
 			// Cancel non-completed runs before queuing a rerun.
-			h.Debugf("Cancellling %s run %v", run.GetStatus(), run.GetID())
+			h.Infof("Cancellling %s run %v", run.GetStatus(), run.GetID())
 			_, err := h.Actions.CancelWorkflowRunByID(ctx, repoOwner, repoName, run.GetID())
 			if err != nil {
 				h.Debugf("Failed to cancel workflow run: %v", err)
 			}
 		}
 
-		h.Debugf("Rerunning %d", run.GetID())
-		_, err := h.Actions.RerunWorkflowByID(ctx, repoOwner, repoName, run.GetID())
-		if err != nil {
-			h.Errorf("Failed to rerun workflow: %v", err)
+		h.Infof("Rerunning %d", run.GetID())
+		if failedOnly {
+			_, err := h.Actions.RerunFailedJobsByID(ctx, repoOwner, repoName, run.GetID())
+			if err != nil {
+				h.Errorf("Failed to rerun failed jobs: %v", err)
+			}
+		} else {
+			_, err := h.Actions.RerunWorkflowByID(ctx, repoOwner, repoName, run.GetID())
+			if err != nil {
+				h.Errorf("Failed to rerun workflow: %v", err)
+			}
 		}
 	}
 
@@ -222,8 +238,9 @@ func isCommenterPrivileged(authorAssoc string) bool {
 	return isPrivileged
 }
 
-func parseCommentsToWorkflowNames(commentBody string) map[string]struct{} {
+func parseCommentsToWorkflowNames(commentBody string) (map[string]struct{}, bool) {
 	testsToRerun := make(map[string]struct{})
+	failedJobsOnly := false
 	scanner := bufio.NewScanner(strings.NewReader(commentBody))
 	for scanner.Scan() {
 		var splitComment []string
@@ -234,9 +251,12 @@ func parseCommentsToWorkflowNames(commentBody string) map[string]struct{} {
 		}
 		// Ignore non-command comments or comments smaller than any command size.
 		if len(splitComment) == 0 || len(splitComment[0]) < 5 || splitComment[0][0] != '/' {
-			return nil
+			return nil, failedJobsOnly
 		}
 		switch splitComment[0][1:] {
+		case retestFailedJobsCommand:
+			failedJobsOnly = true
+			testsToRerun[testAll] = struct{}{}
 		case retestAllWorkflowsCommand:
 			testsToRerun[testAll] = struct{}{}
 		case testWorkflowCommand:
@@ -246,5 +266,11 @@ func parseCommentsToWorkflowNames(commentBody string) map[string]struct{} {
 			testsToRerun[splitComment[1]] = struct{}{}
 		}
 	}
-	return testsToRerun
+	return testsToRerun, failedJobsOnly
+}
+
+// Infof prints an info-level message. The arguments follow the standard Printf
+// arguments.
+func (h *handler) Infof(msg string, args ...interface{}) {
+	fmt.Printf("::notice::%s\n", fmt.Sprintf(msg, args...))
 }
